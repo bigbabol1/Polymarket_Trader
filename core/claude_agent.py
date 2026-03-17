@@ -1,12 +1,12 @@
 """
-Claude AI Trading Agent.
+AI Trading Agent — unterstützt Anthropic Claude und lokales Ollama-LLM.
 
-Verwendet Claude als autonomen Entscheidungsträger mit Tool Use.
-Claude kann Märkte analysieren, Entscheidungen treffen und Trades ausführen.
+Provider wird über LLM_PROVIDER in .env gesteuert:
+  LLM_PROVIDER=anthropic  → Claude API (Standard)
+  LLM_PROVIDER=ollama     → lokales Ollama (OpenAI-kompatible API)
 """
 import json
 from typing import Any
-import anthropic
 from config import api_config, trading_config
 from utils.logger import logger
 from core.polymarket import PolymarketClient
@@ -14,7 +14,7 @@ from core.risk_manager import RiskManager
 
 
 # ---------------------------------------------------------------------------
-# Tool-Definitionen für Claude
+# Tool-Definitionen (Anthropic-Format, wird für Ollama konvertiert)
 # ---------------------------------------------------------------------------
 
 TRADING_TOOLS = [
@@ -178,6 +178,19 @@ TRADING_TOOLS = [
     },
 ]
 
+# OpenAI/Ollama-Format der Tools (wird einmalig konvertiert)
+_OLLAMA_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": t["name"],
+            "description": t["description"],
+            "parameters": t["input_schema"],
+        },
+    }
+    for t in TRADING_TOOLS
+]
+
 
 SYSTEM_PROMPT = """Du bist ein professioneller Prediction-Market-Trader auf Polymarket.com.
 
@@ -216,15 +229,31 @@ Gesamtrisiko-Limit: ${max_portfolio_risk}
 
 
 class ClaudeTrader:
-    """Autonomer Claude AI Trading Agent."""
+    """
+    Autonomer AI Trading Agent.
+    Unterstützt Anthropic Claude (API) und Ollama (lokal) als LLM-Backend.
+    """
 
     def __init__(self, polymarket: PolymarketClient, risk_manager: RiskManager):
-        self.client = anthropic.Anthropic(api_key=api_config.anthropic_api_key)
         self.polymarket = polymarket
         self.risk_manager = risk_manager
-        self.model = "claude-opus-4-6"
+        self.provider = api_config.llm_provider.lower()
         self.conversation_history: list[dict] = []
         self.trade_log: list[dict] = []
+
+        if self.provider == "ollama":
+            from openai import OpenAI
+            self.client = OpenAI(
+                base_url=api_config.ollama_url.rstrip("/") + "/v1",
+                api_key="ollama",
+            )
+            self.model = api_config.ollama_model
+            logger.info(f"[cyan]LLM-Backend: Ollama[/] | Modell: {self.model} | URL: {api_config.ollama_url}")
+        else:
+            import anthropic
+            self.client = anthropic.Anthropic(api_key=api_config.anthropic_api_key)
+            self.model = "claude-opus-4-6"
+            logger.info(f"[cyan]LLM-Backend: Anthropic[/] | Modell: {self.model}")
 
     def _get_system_prompt(self) -> str:
         from datetime import date
@@ -236,8 +265,114 @@ class ClaudeTrader:
             current_date=date.today().isoformat(),
         )
 
+    # -------------------------------------------------------------------------
+    # LLM-Abstraktion: ein einheitlicher Aufruf, zwei Backends
+    # -------------------------------------------------------------------------
+
+    def _llm_step(self, messages: list[dict]) -> tuple[str | None, list[dict]]:
+        """
+        Ruft das LLM einmal auf.
+
+        Returns:
+            (text, tool_calls)
+            - text: Abschluss-Text wenn keine Tools mehr gerufen werden, sonst None
+            - tool_calls: Liste von {"name": str, "input": dict, "id": str}
+        """
+        if self.provider == "ollama":
+            return self._llm_step_ollama(messages)
+        return self._llm_step_anthropic(messages)
+
+    def _llm_step_anthropic(self, messages: list[dict]) -> tuple[str | None, list[dict]]:
+        import anthropic
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=8096,
+            system=self._get_system_prompt(),
+            tools=TRADING_TOOLS,
+            messages=messages,
+        )
+        tool_calls = [b for b in response.content if b.type == "tool_use"]
+        if not tool_calls:
+            text = " ".join(b.text for b in response.content if hasattr(b, "text"))
+            return text, []
+        return None, [{"name": tc.name, "input": tc.input, "id": tc.id} for tc in tool_calls]
+
+    def _llm_step_ollama(self, messages: list[dict]) -> tuple[str | None, list[dict]]:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            tools=_OLLAMA_TOOLS,
+        )
+        msg = response.choices[0].message
+        if not msg.tool_calls:
+            return msg.content or "", []
+        tool_calls = [
+            {
+                "name": tc.function.name,
+                "input": json.loads(tc.function.arguments),
+                "id": tc.id,
+            }
+            for tc in msg.tool_calls
+        ]
+        return None, tool_calls
+
+    # -------------------------------------------------------------------------
+    # Message-History-Abstraktion
+    # -------------------------------------------------------------------------
+
+    def _make_assistant_msg(self, tool_calls: list[dict]) -> dict:
+        """Erstellt eine Assistenten-Nachricht mit Tool-Calls im richtigen Format."""
+        if self.provider == "ollama":
+            return {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc["input"], ensure_ascii=False),
+                        },
+                    }
+                    for tc in tool_calls
+                ],
+            }
+        # Anthropic: muss das echte response.content Objekt sein → wird direkt
+        # in run_trading_session / chat eingefügt, dieser Pfad wird nicht genutzt
+        return {}
+
+    def _make_tool_results_msg(self, tool_calls: list[dict], results: list[str]) -> dict | list[dict]:
+        """Erstellt die Tool-Result-Nachrichten im richtigen Format."""
+        if self.provider == "ollama":
+            # OpenAI: eine Message pro Tool-Result
+            return [
+                {
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result,
+                }
+                for tc, result in zip(tool_calls, results)
+            ]
+        # Anthropic: eine user-Message mit allen tool_results
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tc["id"],
+                    "content": result,
+                }
+                for tc, result in zip(tool_calls, results)
+            ],
+        }
+
+    # -------------------------------------------------------------------------
+    # Tool-Ausführung
+    # -------------------------------------------------------------------------
+
     def _execute_tool(self, tool_name: str, tool_input: dict) -> Any:
-        """Führt ein Tool aus das Claude angefordert hat."""
+        """Führt ein Tool aus das das LLM angefordert hat."""
         logger.debug(f"Tool aufgerufen: {tool_name}({json.dumps(tool_input, ensure_ascii=False)[:200]})")
 
         if tool_name == "get_active_markets":
@@ -245,17 +380,15 @@ class ClaudeTrader:
                 limit=tool_input.get("limit", 20),
                 min_volume=tool_input.get("min_volume", 1000.0),
             )
-            # Kategorie-Filter falls angegeben
             if "category" in tool_input and tool_input["category"]:
                 cat = tool_input["category"].lower()
                 markets = [m for m in markets if cat in (m.get("category", "")).lower()]
-            return self._format_markets_for_claude(markets)
+            return self._format_markets_for_llm(markets)
 
         elif tool_name == "get_market_details":
             market = self.polymarket.get_market_by_id(tool_input["market_id"])
             if not market:
                 return {"error": "Markt nicht gefunden"}
-            # Orderbuch für alle Outcomes laden
             for outcome in market.get("outcomes", []):
                 if outcome.get("token_id"):
                     book = self.polymarket.get_orderbook(outcome["token_id"])
@@ -283,8 +416,6 @@ class ClaudeTrader:
         elif tool_name == "place_trade":
             confidence = float(tool_input.get("confidence", 0))
             amount = float(tool_input["amount_usd"])
-
-            # Risk-Check
             risk_ok, reason = self.risk_manager.check_trade(
                 amount_usd=amount,
                 confidence=confidence,
@@ -293,14 +424,12 @@ class ClaudeTrader:
             if not risk_ok:
                 logger.warning(f"[yellow]Trade vom Risk-Manager abgelehnt:[/] {reason}")
                 return {"status": "REJECTED", "reason": reason}
-
             result = self.polymarket.place_market_order(
                 token_id=tool_input["token_id"],
                 side=tool_input["side"],
                 amount_usd=amount,
                 market_question=tool_input.get("market_question", ""),
             )
-            # Trade loggen
             self.trade_log.append({
                 "timestamp": __import__("datetime").datetime.now().isoformat(),
                 "type": "MARKET",
@@ -318,11 +447,9 @@ class ClaudeTrader:
             confidence = float(tool_input.get("confidence", 0))
             amount = float(tool_input["amount_usd"])
             price = float(tool_input["price"])
-
             risk_ok, reason = self.risk_manager.check_trade(amount, confidence, tool_input["token_id"])
             if not risk_ok:
                 return {"status": "REJECTED", "reason": reason}
-
             result = self.polymarket.place_limit_order(
                 token_id=tool_input["token_id"],
                 side=tool_input["side"],
@@ -353,8 +480,8 @@ class ClaudeTrader:
         else:
             return {"error": f"Unbekanntes Tool: {tool_name}"}
 
-    def _format_markets_for_claude(self, markets: list[dict]) -> list[dict]:
-        """Komprimiert Marktdaten für Claude (weniger Token)."""
+    def _format_markets_for_llm(self, markets: list[dict]) -> list[dict]:
+        """Komprimiert Marktdaten für das LLM (weniger Token)."""
         formatted = []
         for m in markets:
             outcomes_summary = []
@@ -377,125 +504,132 @@ class ClaudeTrader:
         return formatted
 
     # -------------------------------------------------------------------------
-    # Haupt-Trading-Schleife
+    # Haupt-Trading-Schleife (provider-agnostisch)
     # -------------------------------------------------------------------------
 
     def run_trading_session(self, user_instruction: str = "") -> str:
-        """
-        Führt eine vollständige Trading-Session durch.
-
-        Args:
-            user_instruction: Optionale Anweisung (z.B. "Fokussiere auf Krypto-Märkte")
-
-        Returns:
-            Zusammenfassung der Session
-        """
+        """Führt eine vollständige Trading-Session durch."""
         if not user_instruction:
             user_instruction = (
                 "Analysiere den Markt und führe vielversprechende Trades durch. "
                 "Prüfe zuerst das Portfolio, dann suche nach Opportunities."
             )
 
-        logger.info(f"[cyan]Trading-Session gestartet[/] | Modell: {self.model}")
+        logger.info(f"[cyan]Trading-Session gestartet[/] | Provider: {self.provider} | Modell: {self.model}")
         logger.info(f"Anweisung: {user_instruction[:100]}")
 
-        messages = [{"role": "user", "content": user_instruction}]
+        if self.provider == "ollama":
+            messages = [
+                {"role": "system", "content": self._get_system_prompt()},
+                {"role": "user", "content": user_instruction},
+            ]
+        else:
+            messages = [{"role": "user", "content": user_instruction}]
 
-        # Agentic Loop: Claude iteriert bis zur Lösung
         max_iterations = 20
-        iteration = 0
-
-        while iteration < max_iterations:
-            iteration += 1
+        for iteration in range(1, max_iterations + 1):
             logger.debug(f"Iteration {iteration}/{max_iterations}")
 
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=8096,
-                system=self._get_system_prompt(),
-                tools=TRADING_TOOLS,
-                messages=messages,
-            )
-
-            # Tool-Aufrufe verarbeiten
-            tool_calls = [b for b in response.content if b.type == "tool_use"]
-
-            if not tool_calls:
-                # Keine Tools mehr → Claude ist fertig
-                final_text = " ".join(
-                    b.text for b in response.content if hasattr(b, "text")
+            if self.provider == "anthropic":
+                # Anthropic braucht das echte response-Objekt für den History-Eintrag
+                import anthropic
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=8096,
+                    system=self._get_system_prompt(),
+                    tools=TRADING_TOOLS,
+                    messages=messages,
                 )
-                logger.info("[green]Trading-Session beendet[/]")
-                return final_text
+                tool_blocks = [b for b in response.content if b.type == "tool_use"]
+                if not tool_blocks:
+                    return " ".join(b.text for b in response.content if hasattr(b, "text"))
 
-            # Tool-Ergebnisse sammeln
-            messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "assistant", "content": response.content})
+                tool_results = []
+                for tc in tool_blocks:
+                    result = self._execute_tool(tc.name, tc.input)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tc.id,
+                        "content": json.dumps(result, ensure_ascii=False, default=str),
+                    })
+                messages.append({"role": "user", "content": tool_results})
 
-            tool_results = []
-            for tc in tool_calls:
-                result = self._execute_tool(tc.name, tc.input)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tc.id,
-                    "content": json.dumps(result, ensure_ascii=False, default=str),
-                })
+            else:  # ollama
+                text, tool_calls = self._llm_step_ollama(messages)
+                if not tool_calls:
+                    logger.info("[green]Trading-Session beendet[/]")
+                    return text or ""
 
-            messages.append({"role": "user", "content": tool_results})
+                # Assistent-Nachricht mit Tool-Calls zur History
+                messages.append(self._make_assistant_msg(tool_calls))
+
+                # Tools ausführen und Results anhängen
+                results = [
+                    json.dumps(self._execute_tool(tc["name"], tc["input"]), ensure_ascii=False, default=str)
+                    for tc in tool_calls
+                ]
+                tool_msgs = self._make_tool_results_msg(tool_calls, results)
+                if isinstance(tool_msgs, list):
+                    messages.extend(tool_msgs)
+                else:
+                    messages.append(tool_msgs)
 
         logger.warning("Maximale Iterationen erreicht")
         return "Session beendet (max. Iterationen erreicht)"
 
     def chat(self, message: str) -> str:
-        """
-        Interaktiver Chat-Modus mit persistentem Konversations-Kontext.
+        """Interaktiver Chat-Modus mit persistentem Konversations-Kontext."""
+        # History initialisieren (einmalig System-Prompt für Ollama)
+        if not self.conversation_history and self.provider == "ollama":
+            self.conversation_history.append(
+                {"role": "system", "content": self._get_system_prompt()}
+            )
 
-        Args:
-            message: Benutzer-Nachricht
-
-        Returns:
-            Claude's Antwort
-        """
         self.conversation_history.append({"role": "user", "content": message})
 
         max_iterations = 15
         for _ in range(max_iterations):
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=4096,
-                system=self._get_system_prompt(),
-                tools=TRADING_TOOLS,
-                messages=self.conversation_history,
-            )
-
-            tool_calls = [b for b in response.content if b.type == "tool_use"]
-
-            if not tool_calls:
-                self.conversation_history.append({
-                    "role": "assistant",
-                    "content": response.content,
-                })
-                return " ".join(
-                    b.text for b in response.content if hasattr(b, "text")
+            if self.provider == "anthropic":
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=4096,
+                    system=self._get_system_prompt(),
+                    tools=TRADING_TOOLS,
+                    messages=self.conversation_history,
                 )
+                tool_blocks = [b for b in response.content if b.type == "tool_use"]
+                if not tool_blocks:
+                    self.conversation_history.append({"role": "assistant", "content": response.content})
+                    return " ".join(b.text for b in response.content if hasattr(b, "text"))
 
-            self.conversation_history.append({
-                "role": "assistant",
-                "content": response.content,
-            })
+                self.conversation_history.append({"role": "assistant", "content": response.content})
+                tool_results = []
+                for tc in tool_blocks:
+                    result = self._execute_tool(tc.name, tc.input)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tc.id,
+                        "content": json.dumps(result, ensure_ascii=False, default=str),
+                    })
+                self.conversation_history.append({"role": "user", "content": tool_results})
 
-            tool_results = []
-            for tc in tool_calls:
-                result = self._execute_tool(tc.name, tc.input)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tc.id,
-                    "content": json.dumps(result, ensure_ascii=False, default=str),
-                })
+            else:  # ollama
+                text, tool_calls = self._llm_step_ollama(self.conversation_history)
+                if not tool_calls:
+                    self.conversation_history.append({"role": "assistant", "content": text})
+                    return text or ""
 
-            self.conversation_history.append({
-                "role": "user",
-                "content": tool_results,
-            })
+                self.conversation_history.append(self._make_assistant_msg(tool_calls))
+                results = [
+                    json.dumps(self._execute_tool(tc["name"], tc["input"]), ensure_ascii=False, default=str)
+                    for tc in tool_calls
+                ]
+                tool_msgs = self._make_tool_results_msg(tool_calls, results)
+                if isinstance(tool_msgs, list):
+                    self.conversation_history.extend(tool_msgs)
+                else:
+                    self.conversation_history.append(tool_msgs)
 
         return "Antwort konnte nicht vollständig generiert werden."
 
@@ -504,7 +638,6 @@ class ClaudeTrader:
         total_trades = len(self.trade_log)
         total_volume = sum(t["amount_usd"] for t in self.trade_log)
         rejected = sum(1 for t in self.trade_log if t.get("result", {}).get("status") == "REJECTED")
-
         return {
             "total_trades": total_trades,
             "executed": total_trades - rejected,

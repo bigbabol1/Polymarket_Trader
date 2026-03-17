@@ -22,7 +22,13 @@ class TradingConfig:
 @dataclass
 class APIConfig:
     """API-Schlüssel und Endpunkte."""
+    # LLM Provider: "anthropic" oder "ollama"
+    llm_provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "anthropic"))
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
+    # Ollama
+    ollama_url: str = field(default_factory=lambda: os.getenv("OLLAMA_URL", "http://localhost:11434"))
+    ollama_model: str = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "llama3.1:8b"))
+    # Polymarket
     polygon_private_key: str = field(default_factory=lambda: os.getenv("POLYGON_PRIVATE_KEY", ""))
     clob_api_key: str = field(default_factory=lambda: os.getenv("CLOB_API_KEY", ""))
     clob_secret: str = field(default_factory=lambda: os.getenv("CLOB_SECRET", ""))
@@ -34,8 +40,8 @@ class APIConfig:
     def validate(self) -> list[str]:
         """Prüft ob alle nötigen Keys vorhanden sind."""
         errors = []
-        if not self.anthropic_api_key:
-            errors.append("ANTHROPIC_API_KEY fehlt")
+        if self.llm_provider == "anthropic" and not self.anthropic_api_key:
+            errors.append("ANTHROPIC_API_KEY fehlt (oder LLM_PROVIDER=ollama setzen)")
         if not self.polygon_private_key or self.polygon_private_key == "0xYOUR_PRIVATE_KEY_HERE":
             errors.append("POLYGON_PRIVATE_KEY fehlt oder ist noch der Beispielwert")
         return errors

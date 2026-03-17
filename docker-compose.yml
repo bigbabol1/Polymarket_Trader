@@ -1,0 +1,40 @@
+services:
+
+  # ----------------------------------------------------------------
+  # Polymarket Trading Bot
+  # ----------------------------------------------------------------
+  trader:
+    build: .
+    container_name: polymarket-trader
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      ollama:
+        condition: service_healthy
+        required: false   # Nur warten wenn Ollama-Profil aktiv
+    profiles: ["anthropic", "ollama"]
+
+  # ----------------------------------------------------------------
+  # Lokales Ollama LLM (optional — nur mit --profile ollama starten)
+  # Benötigt GPU oder läuft langsamer auf CPU
+  # ----------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: polymarket-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    profiles: ["ollama"]
+
+volumes:
+  ollama_models:

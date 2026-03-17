@@ -72,8 +72,8 @@ def run_startup_checks() -> bool:
         console.print("\n[yellow]Tipp: Kopiere .env.example nach .env und trage deine Werte ein.[/]")
         return False
 
-    if not api_config.anthropic_api_key:
-        console.print("[red]✗ ANTHROPIC_API_KEY fehlt - Claude kann nicht verwendet werden[/]")
+    if api_config.llm_provider == "anthropic" and not api_config.anthropic_api_key:
+        console.print("[red]✗ ANTHROPIC_API_KEY fehlt - setze LLM_PROVIDER=ollama oder trage den Key ein[/]")
         return False
 
     console.print("[green]✓ Konfiguration OK[/]")
@@ -248,8 +248,8 @@ def status():
     Zeigt aktuellen Portfolio-Status ohne Trading.
     """
     print_banner()
-    if not api_config.anthropic_api_key:
-        console.print("[red]ANTHROPIC_API_KEY fehlt[/]")
+    if api_config.llm_provider == "anthropic" and not api_config.anthropic_api_key:
+        console.print("[red]ANTHROPIC_API_KEY fehlt (oder LLM_PROVIDER=ollama setzen)[/]")
         raise typer.Exit(1)
 
     polymarket, risk_manager, trader = create_components()
