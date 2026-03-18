@@ -27,12 +27,27 @@ class PolymarketClient:
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
 
+    def _decode_secret(self) -> bytes:
+        """Dekodiert das Secret mit automatischer Padding-Korrektur."""
+        secret = self.secret
+        # Base64-Padding ergänzen falls nötig
+        missing_padding = len(secret) % 4
+        if missing_padding:
+            secret += "=" * (4 - missing_padding)
+        try:
+            return base64.b64decode(secret)
+        except Exception as e:
+            raise ValueError(
+                f"CLOB_SECRET ist kein gültiges Base64: '{self.secret}' ({len(self.secret)} Zeichen). "
+                f"Bitte API-Credentials unter polymarket.com → Profil → API-Keys neu generieren. Fehler: {e}"
+            )
+
     def _sign_request(self, method: str, path: str, body: str = "") -> dict:
         """Erstellt die CLOB API Signatur-Header."""
         timestamp = str(int(time.time()))
         message = timestamp + method.upper() + path + body
         signature = hmac.new(
-            base64.b64decode(self.secret),
+            self._decode_secret(),
             message.encode("utf-8"),
             hashlib.sha256,
         ).digest()
