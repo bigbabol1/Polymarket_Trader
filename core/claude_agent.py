@@ -533,13 +533,23 @@ class ClaudeTrader:
             if self.provider == "anthropic":
                 # Anthropic braucht das echte response-Objekt für den History-Eintrag
                 import anthropic
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=8096,
-                    system=self._get_system_prompt(),
-                    tools=TRADING_TOOLS,
-                    messages=messages,
-                )
+                import time
+                for _retry in range(5):
+                    try:
+                        response = self.client.messages.create(
+                            model=self.model,
+                            max_tokens=8096,
+                            system=self._get_system_prompt(),
+                            tools=TRADING_TOOLS,
+                            messages=messages,
+                        )
+                        break
+                    except anthropic.OverloadedError:
+                        if _retry == 4:
+                            raise
+                        wait = 2 ** _retry * 10
+                        logger.warning(f"Anthropic API überlastet, warte {wait}s (Versuch {_retry + 1}/5)...")
+                        time.sleep(wait)
                 tool_blocks = [b for b in response.content if b.type == "tool_use"]
                 if not tool_blocks:
                     return " ".join(b.text for b in response.content if hasattr(b, "text"))
