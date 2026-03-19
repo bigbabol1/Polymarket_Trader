@@ -28,8 +28,11 @@ class PolymarketClient:
         self.session.headers.update({"Content-Type": "application/json"})
 
     def _decode_secret(self) -> bytes:
-        """Gibt das Secret als Bytes zurück."""
-        return self.secret.encode("utf-8")
+        """Dekodiert das URL-safe Base64 Secret."""
+        secret = self.secret.strip()
+        # Fehlende Padding-Zeichen ergänzen
+        secret += "=" * (-len(secret) % 4)
+        return base64.urlsafe_b64decode(secret)
 
     def _sign_request(self, method: str, path: str, body: str = "") -> dict:
         """Erstellt die CLOB API Signatur-Header."""
@@ -51,7 +54,9 @@ class PolymarketClient:
 
     def _clob_get(self, path: str, params: dict = None) -> dict | list:
         """Authentifizierter GET-Request an CLOB API."""
-        signed_headers = self._sign_request("GET", path)
+        from urllib.parse import urlencode
+        path_with_params = path + ("?" + urlencode(params) if params else "")
+        signed_headers = self._sign_request("GET", path_with_params)
         self.session.headers.update(signed_headers)
         url = f"{self.clob_url}{path}"
         resp = self.session.get(url, params=params, timeout=15)
@@ -185,7 +190,7 @@ class PolymarketClient:
     def get_positions(self) -> list[dict]:
         """Holt alle offenen Positionen."""
         try:
-            data = self._clob_get("/positions")
+            data = self._clob_get("/data/positions")
             positions = data if isinstance(data, list) else data.get("positions", [])
             return positions
         except Exception as e:
