@@ -35,7 +35,7 @@ class PolymarketClient:
         if missing_padding:
             secret += "=" * (4 - missing_padding)
         try:
-            return base64.b64decode(secret)
+            return base64.urlsafe_b64decode(secret)
         except Exception as e:
             raise ValueError(
                 f"CLOB_SECRET ist kein gültiges Base64: '{self.secret}' ({len(self.secret)} Zeichen). "
