@@ -2,81 +2,46 @@
 Polymarket CLOB API Client.
 Verbindet sich mit der Polymarket Central Limit Order Book API
 und der Gamma API für Marktdaten.
+Verwendet py-clob-client für korrekte Authentifizierung.
 """
 import time
-import hmac
-import hashlib
-import base64
 import json
-from datetime import datetime, timezone
 from typing import Optional
 import requests
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+from py_clob_client.order_builder.constants import BUY, SELL
 from utils.logger import logger
 from config import api_config, trading_config
+
+POLYGON_CHAIN_ID = 137
 
 
 class PolymarketClient:
     """Client für die Polymarket CLOB und Gamma APIs."""
 
     def __init__(self):
-        self.clob_url = api_config.clob_api_url
         self.gamma_url = api_config.gamma_api_url
-        self.api_key = api_config.clob_api_key
-        self.secret = api_config.clob_secret
-        self.passphrase = api_config.clob_pass_phrase
-        self.session = requests.Session()
-        self.session.headers.update({"Content-Type": "application/json"})
+        self._session = requests.Session()
 
-    def _decode_secret(self) -> bytes:
-        """Dekodiert das URL-safe Base64 Secret."""
-        secret = self.secret.strip()
-        # Fehlende Padding-Zeichen ergänzen
-        secret += "=" * (-len(secret) % 4)
-        return base64.urlsafe_b64decode(secret)
-
-    def _sign_request(self, method: str, path: str, body: str = "") -> dict:
-        """Erstellt die CLOB API Signatur-Header."""
-        timestamp = str(int(time.time()))
-        message = timestamp + method.upper() + path + body
-        signature = hmac.new(
-            self._decode_secret(),
-            message.encode("utf-8"),
-            hashlib.sha256,
-        ).digest()
-        sig_b64 = base64.b64encode(signature).decode("utf-8")
-
-        return {
-            "POLY_ADDRESS": self.api_key,
-            "POLY_SIGNATURE": sig_b64,
-            "POLY_TIMESTAMP": timestamp,
-            "POLY_PASSPHRASE": self.passphrase,
-        }
-
-    def _clob_get(self, path: str, params: dict = None) -> dict | list:
-        """Authentifizierter GET-Request an CLOB API."""
-        from urllib.parse import urlencode
-        path_with_params = path + ("?" + urlencode(params) if params else "")
-        signed_headers = self._sign_request("GET", path_with_params)
-        self.session.headers.update(signed_headers)
-        url = f"{self.clob_url}{path}"
-        resp = self.session.get(url, params=params, timeout=15)
-        resp.raise_for_status()
-        return resp.json()
-
-    def _clob_post(self, path: str, data: dict) -> dict:
-        """Authentifizierter POST-Request an CLOB API."""
-        body = json.dumps(data)
-        signed_headers = self._sign_request("POST", path, body)
-        self.session.headers.update(signed_headers)
-        url = f"{self.clob_url}{path}"
-        resp = self.session.post(url, data=body, timeout=15)
-        resp.raise_for_status()
-        return resp.json()
+        # py-clob-client mit API-Key-Authentifizierung (L2)
+        creds = ApiCreds(
+            api_key=api_config.clob_api_key,
+            api_secret=api_config.clob_secret,
+            api_passphrase=api_config.clob_pass_phrase,
+        )
+        self._clob = ClobClient(
+            host=api_config.clob_api_url,
+            key=api_config.polygon_private_key,
+            chain_id=POLYGON_CHAIN_ID,
+            creds=creds,
+            signature_type=0,  # EOA (regular Ethereum account)
+        )
 
     def _gamma_get(self, path: str, params: dict = None) -> dict | list:
-        """Öffentlicher GET-Request an Gamma API (keine Authentifizierung nötig)."""
+        """Öffentlicher GET-Request an Gamma API."""
         url = f"{self.gamma_url}{path}"
-        resp = self.session.get(url, params=params, timeout=15)
+        resp = self._session.get(url, params=params, timeout=15)
         resp.raise_for_status()
         return resp.json()
 
@@ -105,7 +70,6 @@ class PolymarketClient:
             data = self._gamma_get("/markets", params=params)
             markets = data if isinstance(data, list) else data.get("markets", [])
 
-            # Filtere nach Mindestvolumen und bereichere mit Preis-Daten
             enriched = []
             for m in markets:
                 volume = float(m.get("volume", 0) or 0)
@@ -131,7 +95,7 @@ class PolymarketClient:
                 "name": outcome_name,
                 "token_id": token_id,
                 "price": price,
-                "implied_prob": price,  # Bei Polymarket = Preis
+                "implied_prob": price,
             })
 
         return {
@@ -159,8 +123,7 @@ class PolymarketClient:
     def get_orderbook(self, token_id: str) -> dict:
         """Holt das Orderbuch für einen Token."""
         try:
-            data = self._clob_get(f"/book", params={"token_id": token_id})
-            return data
+            return self._clob.get_order_book(token_id)
         except Exception as e:
             logger.warning(f"Orderbuch für {token_id} nicht verfügbar: {e}")
             return {"bids": [], "asks": []}
@@ -168,8 +131,10 @@ class PolymarketClient:
     def get_price(self, token_id: str, side: str = "BUY") -> float:
         """Holt den aktuellen Best-Price für einen Token."""
         try:
-            resp = self._clob_get("/price", params={"token_id": token_id, "side": side})
-            return float(resp.get("price", 0))
+            resp = self._clob.get_price(token_id, side)
+            if isinstance(resp, dict):
+                return float(resp.get("price", 0))
+            return float(resp)
         except Exception as e:
             logger.warning(f"Preis für {token_id} nicht verfügbar: {e}")
             return 0.0
@@ -181,18 +146,32 @@ class PolymarketClient:
     def get_balance(self) -> float:
         """Holt das USDC-Guthaben des Wallets."""
         try:
-            data = self._clob_get("/balance-allowance", params={"asset_type": "USDC"})
-            return float(data.get("balance", 0))
+            data = self._clob.get_balance_allowance(params={"asset_type": "USDC"})
+            if isinstance(data, dict):
+                return float(data.get("balance", 0))
+            return float(data)
         except Exception as e:
             logger.error(f"Fehler beim Laden des Guthabens: {e}")
             return 0.0
 
     def get_positions(self) -> list[dict]:
-        """Holt alle offenen Positionen."""
+        """Holt alle offenen Positionen (aus Trade-Historie berechnet)."""
+        # py-clob-client hat keine direkte get_positions() Methode.
+        # Offene Positionen = Tokens mit positivem Bestand aus abgeschlossenen Trades.
         try:
-            data = self._clob_get("/data/positions")
-            positions = data if isinstance(data, list) else data.get("positions", [])
-            return positions
+            trades = self.get_trade_history(limit=200)
+            positions: dict[str, float] = {}
+            for t in trades:
+                tid = t.get("asset_id", "")
+                size = float(t.get("size", 0) or 0)
+                side = t.get("side", "BUY").upper()
+                if tid:
+                    positions[tid] = positions.get(tid, 0) + (size if side == "BUY" else -size)
+            return [
+                {"token_id": tid, "size": size}
+                for tid, size in positions.items()
+                if size > 0
+            ]
         except Exception as e:
             logger.error(f"Fehler beim Laden der Positionen: {e}")
             return []
@@ -200,8 +179,10 @@ class PolymarketClient:
     def get_open_orders(self) -> list[dict]:
         """Holt alle offenen Orders."""
         try:
-            data = self._clob_get("/orders", params={"status": "LIVE"})
-            return data if isinstance(data, list) else data.get("orders", [])
+            data = self._clob.get_orders()
+            if isinstance(data, list):
+                return data
+            return data.get("data", []) if isinstance(data, dict) else []
         except Exception as e:
             logger.error(f"Fehler beim Laden der Orders: {e}")
             return []
@@ -209,8 +190,10 @@ class PolymarketClient:
     def get_trade_history(self, limit: int = 50) -> list[dict]:
         """Holt die Trade-Historie."""
         try:
-            data = self._clob_get("/trades", params={"limit": limit})
-            return data if isinstance(data, list) else data.get("data", [])
+            data = self._clob.get_trades(params={"limit": limit})
+            if isinstance(data, list):
+                return data
+            return data.get("data", []) if isinstance(data, dict) else []
         except Exception as e:
             logger.error(f"Fehler beim Laden der Trade-Historie: {e}")
             return []
@@ -253,15 +236,13 @@ class PolymarketClient:
             }
 
         try:
-            order_data = {
-                "token_id": token_id,
-                "side": side.upper(),
-                "size": str(amount_usd),
-                "price": "0",  # Market Order = Preis 0
-                "type": "MARKET",
-                "time_in_force": "IOC",
-            }
-            result = self._clob_post("/order", order_data)
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=0.5,  # Market order — Preis wird ignoriert
+                size=amount_usd,
+                side=BUY if side.upper() == "BUY" else SELL,
+            )
+            result = self._clob.create_market_order(order_args)
             logger.info(
                 f"[green]Order ausgeführt:[/] {side} ${amount_usd:.2f} "
                 f"| OrderID: {result.get('orderID', 'N/A')}"
@@ -307,14 +288,13 @@ class PolymarketClient:
             }
 
         try:
-            order_data = {
-                "token_id": token_id,
-                "side": side.upper(),
-                "size": str(size_usd),
-                "price": str(price),
-                "type": "GTC",  # Good Till Cancelled
-            }
-            result = self._clob_post("/order", order_data)
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=price,
+                size=size_usd,
+                side=BUY if side.upper() == "BUY" else SELL,
+            )
+            result = self._clob.create_order(order_args)
             logger.info(
                 f"[green]Limit-Order:[/] {side} ${size_usd:.2f} @ {price:.3f} "
                 f"| OrderID: {result.get('orderID', 'N/A')}"
@@ -332,7 +312,7 @@ class PolymarketClient:
             return True
 
         try:
-            self._clob_post("/cancel", {"orderID": order_id})
+            self._clob.cancel(order_id)
             logger.info(f"[green]Order storniert:[/] {order_id}")
             return True
         except Exception as e:
