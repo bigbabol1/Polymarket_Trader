@@ -30,12 +30,16 @@ class PolymarketClient:
             api_secret=api_config.clob_secret,
             api_passphrase=api_config.clob_pass_phrase,
         )
+        # signature_type=2: Polymarket Proxy-Wallet (Privy Embedded Wallets / Smart Contract Wallets)
+        # signature_type=0: EOA (MetaMask / reguläre Ethereum-Wallets)
+        sig_type = 2 if api_config.funder_address else 0
         self._clob = ClobClient(
             host=api_config.clob_api_url,
             key=api_config.polygon_private_key,
             chain_id=POLYGON_CHAIN_ID,
             creds=creds,
-            signature_type=0,  # EOA (regular Ethereum account)
+            signature_type=sig_type,
+            funder=api_config.funder_address or None,
         )
 
     def _gamma_get(self, path: str, params: dict = None) -> dict | list:
