@@ -147,15 +147,21 @@ class PolymarketClient:
         """Holt das USDC-Guthaben des Wallets."""
         try:
             params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            logger.debug(f"[DEBUG] update_balance_allowance params: {params}")
             self._clob.update_balance_allowance(params=params)
             data = self._clob.get_balance_allowance(params=params)
+            logger.debug(f"[DEBUG] get_balance_allowance raw response: {data!r} (type={type(data).__name__})")
             if isinstance(data, dict):
                 raw = float(data.get("balance", 0))
+                logger.debug(f"[DEBUG] raw balance value: {raw}")
                 # USDC hat 6 Dezimalstellen — raw-Wert durch 10^6 teilen
-                return raw / 1_000_000 if raw > 1000 else raw
+                result = raw / 1_000_000 if raw > 1000 else raw
+                logger.debug(f"[DEBUG] converted balance: {result}")
+                return result
+            logger.debug(f"[DEBUG] balance not a dict, raw value: {data!r}")
             return float(data)
         except Exception as e:
-            logger.error(f"Fehler beim Laden des Guthabens: {e}")
+            logger.error(f"Fehler beim Laden des Guthabens: {e}", exc_info=True)
             return 0.0
 
     def get_positions(self) -> list[dict]:
