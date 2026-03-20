@@ -405,8 +405,12 @@ class ClaudeTrader:
             positions = self.polymarket.get_positions()
             open_orders = self.polymarket.get_open_orders()
             portfolio_summary = self.risk_manager.get_portfolio_summary(balance, positions)
+            # Polymarket hält Funds intern — CLOB gibt 0 zurück obwohl Funds vorhanden.
+            # Effektive Balance = konfiguriertes Risiko-Limit wenn CLOB 0 meldet.
+            effective_balance = balance if balance > 0 else trading_config.max_portfolio_risk
             return {
-                "balance_usdc": balance,
+                "balance_usdc": effective_balance,
+                "clob_balance_raw": balance,
                 "open_positions": positions,
                 "open_orders_count": len(open_orders),
                 "portfolio_summary": portfolio_summary,
