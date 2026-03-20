@@ -15,6 +15,9 @@ from utils.logger import logger
 from config import api_config, trading_config
 
 POLYGON_CHAIN_ID = 137
+# USDC (PoS) Contract auf Polygon — von Polymarket verwendet
+USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+POLYGON_RPC = "https://polygon-rpc.com"
 
 
 class PolymarketClient:
@@ -147,23 +150,46 @@ class PolymarketClient:
     # Portfolio & Positionen
     # -------------------------------------------------------------------------
 
+    def _get_onchain_usdc_balance(self, address: str) -> float:
+        """Liest USDC-Guthaben direkt vom Polygon-Netzwerk (ERC-20 balanceOf)."""
+        try:
+            # balanceOf(address) Funktionssignatur: 0x70a08231
+            padded = address.lower().replace("0x", "").zfill(64)
+            data = "0x70a08231" + padded
+            payload = {
+                "jsonrpc": "2.0", "id": 1,
+                "method": "eth_call",
+                "params": [{"to": USDC_CONTRACT, "data": data}, "latest"],
+            }
+            resp = requests.post(POLYGON_RPC, json=payload, timeout=8)
+            result_hex = resp.json().get("result", "0x0")
+            raw = int(result_hex, 16)
+            balance = raw / 1_000_000  # USDC hat 6 Dezimalstellen
+            logger.debug(f"[DEBUG] On-Chain USDC Balance für {address}: {balance:.2f}")
+            return balance
+        except Exception as e:
+            logger.warning(f"On-Chain Balance-Abfrage fehlgeschlagen: {e}")
+            return 0.0
+
     def get_balance(self) -> float:
         """Holt das USDC-Guthaben des Wallets."""
         try:
             params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
-            logger.debug(f"[DEBUG] update_balance_allowance params: {params}")
             self._clob.update_balance_allowance(params=params)
             data = self._clob.get_balance_allowance(params=params)
-            logger.debug(f"[DEBUG] get_balance_allowance raw response: {data!r} (type={type(data).__name__})")
+            logger.debug(f"[DEBUG] get_balance_allowance raw response: {data!r}")
             if isinstance(data, dict):
                 raw = float(data.get("balance", 0))
-                logger.debug(f"[DEBUG] raw balance value: {raw}")
-                # USDC hat 6 Dezimalstellen — raw-Wert durch 10^6 teilen
                 result = raw / 1_000_000 if raw > 1000 else raw
-                logger.debug(f"[DEBUG] converted balance: {result}")
-                return result
-            logger.debug(f"[DEBUG] balance not a dict, raw value: {data!r}")
-            return float(data)
+                logger.debug(f"[DEBUG] CLOB Balance: {result:.2f}")
+                if result > 0:
+                    return result
+            # Fallback: USDC direkt on-chain lesen (Proxy-Wallet)
+            funder = api_config.funder_address
+            if funder:
+                logger.info("CLOB Balance = 0 → lese USDC direkt von Polygon-Chain (Proxy-Wallet)")
+                return self._get_onchain_usdc_balance(funder)
+            return 0.0
         except Exception as e:
             logger.error(f"Fehler beim Laden des Guthabens: {e}", exc_info=True)
             return 0.0
