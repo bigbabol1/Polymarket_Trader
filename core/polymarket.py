@@ -9,7 +9,7 @@ import json
 from typing import Optional
 import requests
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType, BalanceAllowanceParams, TradeParams, AssetType
 from py_clob_client.order_builder.constants import BUY, SELL
 from utils.logger import logger
 from config import api_config, trading_config
@@ -146,7 +146,7 @@ class PolymarketClient:
     def get_balance(self) -> float:
         """Holt das USDC-Guthaben des Wallets."""
         try:
-            data = self._clob.get_balance_allowance(params={"asset_type": "USDC"})
+            data = self._clob.get_balance_allowance(params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
             if isinstance(data, dict):
                 return float(data.get("balance", 0))
             return float(data)
@@ -190,7 +190,7 @@ class PolymarketClient:
     def get_trade_history(self, limit: int = 50) -> list[dict]:
         """Holt die Trade-Historie."""
         try:
-            data = self._clob.get_trades(params={"limit": limit})
+            data = self._clob.get_trades(params=TradeParams())
             if isinstance(data, list):
                 return data
             return data.get("data", []) if isinstance(data, dict) else []
