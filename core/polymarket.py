@@ -310,11 +310,15 @@ class PolymarketClient:
         except Exception as e:
             status_code = getattr(e, 'status_code', 'N/A')
             error_msg = getattr(e, 'error_msg', str(e))
-            logger.error(
-                f"Order fehlgeschlagen [HTTP {status_code}]: {error_msg}",
-                exc_info=True,
-            )
-            return {"error": str(error_msg), "status": "FAILED"}
+            if status_code == 403 and "geoblock" in str(error_msg).lower():
+                logger.error(
+                    "[red]GEOBLOCK:[/] Polymarket sperrt Trading aus dieser Region. "
+                    "VPN aktivieren oder auf einen Server in EU deployen. "
+                    "Details: https://docs.polymarket.com/developers/CLOB/geoblock"
+                )
+            else:
+                logger.error(f"Order fehlgeschlagen [HTTP {status_code}]: {error_msg}", exc_info=True)
+            return {"error": str(error_msg), "status": "FAILED", "geoblock": status_code == 403}
 
     def place_limit_order(
         self,
