@@ -31,6 +31,9 @@ class APIConfig:
     # Polymarket
     polygon_private_key: str = field(default_factory=lambda: os.getenv("POLYGON_PRIVATE_KEY", ""))
     funder_address: str = field(default_factory=lambda: os.getenv("FUNDER_ADDRESS", ""))
+    # signature_type: 0=EOA, 1=POLY_PROXY (Privy/Magic Link), 2=GNOSIS_SAFE
+    # Privy embedded wallets (Email-Login) → POLY_PROXY = 1
+    signature_type: int = int(os.getenv("SIGNATURE_TYPE", "1"))
     clob_api_key: str = field(default_factory=lambda: os.getenv("CLOB_API_KEY", ""))
     clob_secret: str = field(default_factory=lambda: os.getenv("CLOB_SECRET", ""))
     clob_pass_phrase: str = field(default_factory=lambda: os.getenv("CLOB_PASS_PHRASE", ""))

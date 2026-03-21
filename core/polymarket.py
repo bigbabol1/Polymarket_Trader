@@ -33,9 +33,10 @@ class PolymarketClient:
             api_secret=api_config.clob_secret,
             api_passphrase=api_config.clob_pass_phrase,
         )
-        # signature_type=2: Polymarket Proxy-Wallet (Privy Embedded Wallets / Smart Contract Wallets)
-        # signature_type=0: EOA (MetaMask / reguläre Ethereum-Wallets)
-        sig_type = 2 if api_config.funder_address else 0
+        # signature_type: 0=EOA, 1=POLY_PROXY (Privy/Magic Link Email-Login), 2=GNOSIS_SAFE
+        # Konfigurierbar über SIGNATURE_TYPE env-Variable (Standard: 1 für Privy)
+        sig_type = api_config.signature_type
+        logger.info(f"CLOB signature_type={sig_type}, funder={api_config.funder_address or 'nicht gesetzt'}")
         self._clob = ClobClient(
             host=api_config.clob_api_url,
             key=api_config.polygon_private_key,
