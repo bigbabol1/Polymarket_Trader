@@ -34,6 +34,9 @@ class APIConfig:
     # signature_type: 0=EOA, 1=POLY_PROXY (Privy/Magic Link), 2=GNOSIS_SAFE
     # Privy embedded wallets (Email-Login) → POLY_PROXY = 1
     signature_type: int = int(os.getenv("SIGNATURE_TYPE", "1"))
+    # News (Google News RSS — kostenlos, kein API-Key nötig)
+    news_max_keywords: int = int(os.getenv("NEWS_MAX_KEYWORDS", "5"))
+    news_max_articles: int = int(os.getenv("NEWS_MAX_ARTICLES", "5"))
     clob_api_key: str = field(default_factory=lambda: os.getenv("CLOB_API_KEY", ""))
     clob_secret: str = field(default_factory=lambda: os.getenv("CLOB_SECRET", ""))
     clob_pass_phrase: str = field(default_factory=lambda: os.getenv("CLOB_PASS_PHRASE", ""))

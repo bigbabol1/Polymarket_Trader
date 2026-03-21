@@ -176,6 +176,24 @@ TRADING_TOOLS = [
             },
         },
     },
+    {
+        "name": "get_market_news",
+        "description": (
+            "Holt aktuelle Nachrichten (Google News RSS, kostenlos) zu einem Markt-Thema. "
+            "Nutze dies BEVOR du einen Trade platzierst, um informierte Entscheidungen zu treffen. "
+            "Gibt Schlagzeilen, Quellen, Datum und Kurzzusammenfassung zurück."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market_question": {
+                    "type": "string",
+                    "description": "Die Marktfrage oder das Thema für das Nachrichten gesucht werden sollen",
+                },
+            },
+            "required": ["market_question"],
+        },
+    },
 ]
 
 # OpenAI/Ollama-Format der Tools (wird einmalig konvertiert)
@@ -208,13 +226,15 @@ Deine Aufgabe ist es, Märkte zu analysieren und profitable Trades zu finden.
 1. Lade zuerst den Portfolio-Status (Guthaben, Positionen)
 2. Durchsuche aktive Märkte nach Opportunities
 3. Analysiere vielversprechende Märkte im Detail
-4. Vergleiche Marktpreise mit deiner eigenen Wahrscheinlichkeitseinschätzung
-5. Platziere Trades NUR wenn:
+4. **Hole aktuelle Nachrichten** mit `get_market_news` für jeden interessanten Markt
+5. Berücksichtige die News in deiner Wahrscheinlichkeitseinschätzung
+6. Vergleiche Marktpreise mit deiner news-informierten Einschätzung
+7. Platziere Trades NUR wenn:
    - Deine geschätzte Wahrscheinlichkeit > Marktpreis + 5% (für BUY)
    - Konfidenz ≥ {min_confidence}
    - Positionsgrösse ≤ ${max_position_size}
    - Maximale Positionen nicht überschritten
-6. Gib eine strukturierte Zusammenfassung deiner Entscheidungen
+8. Gib eine strukturierte Zusammenfassung deiner Entscheidungen (inkl. News-Quellen)
 
 ## Wichtige Regeln:
 - Sei KONSERVATIV bei unklaren Situationen
@@ -480,6 +500,16 @@ class ClaudeTrader:
 
         elif tool_name == "get_trade_history":
             return self.polymarket.get_trade_history(limit=tool_input.get("limit", 20))
+
+        elif tool_name == "get_market_news":
+            from core.news_client import fetch_news
+            articles = fetch_news(
+                market_question=tool_input["market_question"],
+                max_articles=api_config.news_max_articles,
+            )
+            if not articles:
+                return {"message": "Keine Nachrichten gefunden", "articles": []}
+            return {"articles": articles, "count": len(articles)}
 
         else:
             return {"error": f"Unbekanntes Tool: {tool_name}"}
