@@ -9,7 +9,7 @@ import json
 from typing import Optional
 import requests
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType, BalanceAllowanceParams, TradeParams, AssetType
+from py_clob_client.clob_types import ApiCreds, OrderArgs, MarketOrderArgs, OrderType, BalanceAllowanceParams, TradeParams, AssetType
 from py_clob_client.order_builder.constants import BUY, SELL
 from utils.logger import logger
 from config import api_config, trading_config
@@ -277,10 +277,9 @@ class PolymarketClient:
             }
 
         try:
-            order_args = OrderArgs(
+            order_args = MarketOrderArgs(
                 token_id=token_id,
-                price=0.5,  # Market order — Preis wird ignoriert
-                size=amount_usd,
+                amount=amount_usd,
                 side=BUY if side.upper() == "BUY" else SELL,
             )
             result = self._clob.create_market_order(order_args)
