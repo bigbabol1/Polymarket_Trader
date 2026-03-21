@@ -1,37 +1,44 @@
 """
-NewsWatcher: Push-ähnlicher News-Monitor via periodisches RSS-Polling.
+NewsWatcher: Dual-Speed News-Monitor.
 
-Funktionsweise:
-  - Pollt Google News RSS alle NEWS_WATCH_INTERVAL Sekunden (Standard: 90s)
-  - Vergleicht neue Artikel mit bereits gesehenen URLs
-  - Ruft bei wirklich neuen Artikeln sofort einen Callback auf
-  - KI bleibt vollständig inaktiv solange nichts Neues eintrifft
+Zwei parallele Polling-Strategien:
 
-Vorteile gegenüber Pull:
-  - Reaktionszeit = Polling-Intervall (nicht Trading-Intervall)
-  - Keine KI-Kosten wenn keine relevanten News erscheinen
-  - Mehrere Keywords/Märkte werden parallel überwacht
+  SCHNELL — Direkte RSS-Quellen (BBC, Reuters, Guardian, NPR, CoinDesk, Politico)
+    → alle 30s (Standard), parallel gefetcht in ~2-5s
+    → Eine Anfrage pro Quelle deckt ALLE Keywords ab (lokales Matching)
+    → Typische Reaktionszeit: 10–60s nach Artikel-Veröffentlichung
+
+  LANGSAM — Google News RSS (keyword-spezifische Suche)
+    → alle 90s (jeder 3. Zyklus), eine Anfrage pro Keyword
+    → Breitere Quellenabdeckung, aber ~15 Min Aggregations-Lag bei Google
+
+KI-Aktivierung:
+  - Nur bei wirklich neuen Artikeln (URL-basierter Dedup)
+  - Cooldown verhindert KI-Spam bei News-Flut
+  - KI bleibt 100% inaktiv solange keine neuen Artikel erscheinen
 """
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from core.news_client import _extract_keywords, fetch_news
+from core.news_client import _extract_keywords, fetch_direct_sources, fetch_news
 from utils.logger import logger
 
 
 @dataclass
 class NewsEvent:
     """Ein News-Ereignis das den Trading-Trigger auslöst."""
-    keyword_label: str        # Lesbare Bezeichnung (z.B. die Marktfrage)
-    query: str                # Verwendeter Suchbegriff
-    articles: list[dict]      # Neue Artikel (title, source, published, url, summary)
+    keyword_label: str    # Lesbare Bezeichnung (z.B. Marktfrage)
+    query: str            # Verwendeter Suchbegriff
+    articles: list[dict]  # Neue Artikel
+    source_type: str      # "direct" oder "google"
     triggered_at: float = field(default_factory=time.time)
 
     def format_for_ai(self) -> str:
         """Formatiert die News kompakt für den KI-Prompt."""
-        lines = [f"** Neue Nachrichten zu: {self.keyword_label} **\n"]
+        speed_label = "Direktquelle" if self.source_type == "direct" else "Google News"
+        lines = [f"** Neue Nachrichten zu: {self.keyword_label} ({speed_label}) **\n"]
         for i, a in enumerate(self.articles, 1):
             lines.append(
                 f"{i}. [{a.get('source', '?')}] {a['title']}\n"
@@ -43,45 +50,36 @@ class NewsEvent:
 
 class NewsWatcher:
     """
-    Hintergrund-Thread der RSS-Feeds überwacht und bei neuen Artikeln
-    sofort einen Callback aufruft (push-ähnliches Verhalten).
+    Hintergrund-Thread mit Dual-Speed-Polling:
+      - Direkte RSS-Quellen: alle `interval_seconds` (Standard: 30s)
+      - Google News RSS: alle `interval_seconds * 3` (Standard: 90s)
 
     Verwendung:
-        watcher = NewsWatcher(on_news=my_callback, interval_seconds=90)
-        watcher.add_keyword("US Election", "Trump election 2025")
-        watcher.add_keyword("Bitcoin ETF")  # Query wird automatisch extrahiert
+        watcher = NewsWatcher(on_news=callback, interval_seconds=30)
+        watcher.add_keyword("Trump election")
         watcher.start()
-        # ... später:
         watcher.stop()
     """
 
     def __init__(
         self,
         on_news: Callable[[NewsEvent], None],
-        interval_seconds: int = 90,
+        interval_seconds: int = 30,
     ):
         self.on_news = on_news
         self.interval = interval_seconds
 
-        # label → query_string (label ist die menschenlesbare Bezeichnung)
-        self._keywords: dict[str, str] = {}
+        self._keywords: dict[str, str] = {}   # label → query
         self._seen_urls: set[str] = set()
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------
-    # Keyword-Verwaltung (thread-safe, jederzeit änderbar)
+    # Keyword-Verwaltung
     # ------------------------------------------------------------------
 
     def add_keyword(self, label: str, query: str | None = None):
-        """
-        Fügt ein Keyword zum Monitoring hinzu.
-
-        Args:
-            label: Menschenlesbare Bezeichnung (z.B. Marktfrage)
-            query: RSS-Suchbegriff. Falls None: wird aus label extrahiert.
-        """
         q = (query or _extract_keywords(label)).strip()
         if not q:
             return
@@ -94,7 +92,6 @@ class NewsWatcher:
             self._keywords.pop(label, None)
 
     def set_keywords_bulk(self, keyword_map: dict[str, str]):
-        """Ersetzt alle Keywords auf einmal (atomare Operation)."""
         with self._lock:
             self._keywords = dict(keyword_map)
         logger.info(f"[cyan]News-Watcher:[/] {len(keyword_map)} Keywords aktiv")
@@ -104,7 +101,6 @@ class NewsWatcher:
             return dict(self._keywords)
 
     def clear_seen_cache(self):
-        """Setzt den Seen-Cache zurück (alle URLs gelten wieder als neu)."""
         with self._lock:
             self._seen_urls.clear()
         logger.debug("News-Watcher: Seen-Cache geleert")
@@ -126,7 +122,8 @@ class NewsWatcher:
         self._thread.start()
         logger.info(
             f"[green]News-Watcher gestartet[/] | "
-            f"Intervall: {self.interval}s | "
+            f"Direkt: alle {self.interval}s | "
+            f"Google: alle {self.interval * 3}s | "
             f"Keywords: {len(self._keywords)}"
         )
 
@@ -141,51 +138,91 @@ class NewsWatcher:
         return bool(self._thread and self._thread.is_alive())
 
     # ------------------------------------------------------------------
-    # Poll-Schleife (läuft im Hintergrund-Thread)
+    # Poll-Schleife
     # ------------------------------------------------------------------
 
     def _poll_loop(self):
+        cycle = 0
         logger.debug("News-Watcher Poll-Loop gestartet")
+
         while not self._stop_event.is_set():
+            cycle += 1
             with self._lock:
                 snapshot = dict(self._keywords)
 
-            for label, query in snapshot.items():
-                if self._stop_event.is_set():
-                    break
-                try:
-                    self._check_keyword(label, query)
-                except Exception as e:
-                    logger.warning(f"News-Watcher Fehler für '{query}': {e}")
+            if snapshot:
+                queries = list(snapshot.values())
+                label_for_query = {v: k for k, v in snapshot.items()}
 
-            # Warte auf nächsten Zyklus — reagiert sofort auf stop()
+                # --- Direkte Quellen: jeden Zyklus (30s) ---
+                self._poll_direct(queries, label_for_query)
+
+                # --- Google RSS: jeden 3. Zyklus (90s effektiv) ---
+                if cycle % 3 == 0:
+                    self._poll_google(snapshot)
+
             self._stop_event.wait(timeout=self.interval)
 
         logger.debug("News-Watcher Poll-Loop beendet")
 
-    def _check_keyword(self, label: str, query: str):
-        """Holt RSS-Artikel und filtert bereits gesehene heraus."""
-        articles = fetch_news(query, max_articles=10)
+    def _poll_direct(self, queries: list[str], label_for_query: dict[str, str]):
+        """Holt alle direkten Quellen parallel und prüft auf neue Artikel."""
+        if self._stop_event.is_set():
+            return
+        try:
+            matched = fetch_direct_sources(queries)
+        except Exception as e:
+            logger.warning(f"Direct-RSS Poll Fehler: {e}")
+            return
 
-        new_articles = []
+        for query, articles in matched.items():
+            new_articles = self._filter_new(articles)
+            if new_articles:
+                label = label_for_query.get(query, query)
+                self._emit(NewsEvent(
+                    keyword_label=label,
+                    query=query,
+                    articles=new_articles,
+                    source_type="direct",
+                ))
+
+    def _poll_google(self, snapshot: dict[str, str]):
+        """Holt Google News RSS pro Keyword (breitere Quellenabdeckung)."""
+        for label, query in snapshot.items():
+            if self._stop_event.is_set():
+                break
+            try:
+                articles = fetch_news(query, max_articles=10)
+                new_articles = self._filter_new(articles)
+                if new_articles:
+                    self._emit(NewsEvent(
+                        keyword_label=label,
+                        query=query,
+                        articles=new_articles,
+                        source_type="google",
+                    ))
+            except Exception as e:
+                logger.warning(f"Google-RSS Fehler für '{query}': {e}")
+
+    def _filter_new(self, articles: list[dict]) -> list[dict]:
+        """Gibt nur Artikel zurück die noch nicht gesehen wurden."""
+        new = []
         with self._lock:
             for article in articles:
                 url = article.get("url", "")
                 if url and url not in self._seen_urls:
                     self._seen_urls.add(url)
-                    new_articles.append(article)
+                    new.append(article)
+        return new
 
-        if new_articles:
-            logger.info(
-                f"[yellow bold]Breaking News![/] "
-                f"{len(new_articles)} neuer Artikel | Thema: '{label}'"
-            )
-            event = NewsEvent(
-                keyword_label=label,
-                query=query,
-                articles=new_articles,
-            )
-            try:
-                self.on_news(event)
-            except Exception as e:
-                logger.error(f"News-Callback Fehler: {e}")
+    def _emit(self, event: NewsEvent):
+        logger.info(
+            f"[yellow bold]Breaking News![/] "
+            f"{len(event.articles)} Artikel | "
+            f"'{event.keyword_label}' | "
+            f"Quelle: {event.source_type}"
+        )
+        try:
+            self.on_news(event)
+        except Exception as e:
+            logger.error(f"News-Callback Fehler: {e}")

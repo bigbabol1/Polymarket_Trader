@@ -39,7 +39,7 @@ class APIConfig:
     news_max_articles: int = int(os.getenv("NEWS_MAX_ARTICLES", "5"))
     # News-Watcher (push-ähnlicher Modus)
     news_watch_keywords: str = field(default_factory=lambda: os.getenv("NEWS_WATCH_KEYWORDS", ""))
-    news_watch_interval: int = int(os.getenv("NEWS_WATCH_INTERVAL", "90"))
+    news_watch_interval: int = int(os.getenv("NEWS_WATCH_INTERVAL", "30"))
     news_cooldown: int = int(os.getenv("NEWS_COOLDOWN", "300"))
     clob_api_key: str = field(default_factory=lambda: os.getenv("CLOB_API_KEY", ""))
     clob_secret: str = field(default_factory=lambda: os.getenv("CLOB_SECRET", ""))
