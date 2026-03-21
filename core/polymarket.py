@@ -45,6 +45,22 @@ class PolymarketClient:
             signature_type=sig_type,
             funder=api_config.funder_address or None,
         )
+        self._verify_auth()
+
+    def _verify_auth(self):
+        """Prüft ob die API-Credentials gültig sind."""
+        try:
+            ok = self._clob.get_ok()
+            logger.info(f"[green]CLOB API verbunden:[/] {ok}")
+            try:
+                profile = self._clob.get_api_keys()
+                logger.info(f"[green]API-Key gültig:[/] {profile}")
+            except Exception as e:
+                status_code = getattr(e, 'status_code', 'N/A')
+                error_msg = getattr(e, 'error_msg', str(e))
+                logger.warning(f"[yellow]API-Key Prüfung fehlgeschlagen [HTTP {status_code}]: {error_msg}[/]")
+        except Exception as e:
+            logger.warning(f"[yellow]CLOB Verbindungstest fehlgeschlagen: {e}[/]")
 
     def _gamma_get(self, path: str, params: dict = None) -> dict | list:
         """Öffentlicher GET-Request an Gamma API."""
@@ -286,13 +302,19 @@ class PolymarketClient:
             result = self._clob.post_order(signed_order, OrderType.FOK)
             logger.info(
                 f"[green]Order ausgeführt:[/] {side} ${amount_usd:.2f} "
-                f"| OrderID: {result.get('orderID', 'N/A')}"
+                f"| OrderID: {result.get('orderID', 'N/A')} "
+                f"| Status: {result.get('status', 'N/A')}"
             )
             return result
 
         except Exception as e:
-            logger.error(f"Order fehlgeschlagen: {e}")
-            return {"error": str(e), "status": "FAILED"}
+            status_code = getattr(e, 'status_code', 'N/A')
+            error_msg = getattr(e, 'error_msg', str(e))
+            logger.error(
+                f"Order fehlgeschlagen [HTTP {status_code}]: {error_msg}",
+                exc_info=True,
+            )
+            return {"error": str(error_msg), "status": "FAILED"}
 
     def place_limit_order(
         self,
@@ -344,8 +366,13 @@ class PolymarketClient:
             return result
 
         except Exception as e:
-            logger.error(f"Limit-Order fehlgeschlagen: {e}")
-            return {"error": str(e), "status": "FAILED"}
+            status_code = getattr(e, 'status_code', 'N/A')
+            error_msg = getattr(e, 'error_msg', str(e))
+            logger.error(
+                f"Limit-Order fehlgeschlagen [HTTP {status_code}]: {error_msg}",
+                exc_info=True,
+            )
+            return {"error": str(error_msg), "status": "FAILED"}
 
     def cancel_order(self, order_id: str) -> bool:
         """Storniert eine offene Order."""
