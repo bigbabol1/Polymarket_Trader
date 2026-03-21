@@ -282,7 +282,8 @@ class PolymarketClient:
                 amount=amount_usd,
                 side=BUY if side.upper() == "BUY" else SELL,
             )
-            result = self._clob.create_market_order(order_args)
+            signed_order = self._clob.create_market_order(order_args)
+            result = self._clob.post_order(signed_order, OrderType.FOK)
             logger.info(
                 f"[green]Order ausgeführt:[/] {side} ${amount_usd:.2f} "
                 f"| OrderID: {result.get('orderID', 'N/A')}"
@@ -334,7 +335,8 @@ class PolymarketClient:
                 size=size_usd,
                 side=BUY if side.upper() == "BUY" else SELL,
             )
-            result = self._clob.create_order(order_args)
+            signed_order = self._clob.create_order(order_args)
+            result = self._clob.post_order(signed_order, OrderType.GTC)
             logger.info(
                 f"[green]Limit-Order:[/] {side} ${size_usd:.2f} @ {price:.3f} "
                 f"| OrderID: {result.get('orderID', 'N/A')}"
